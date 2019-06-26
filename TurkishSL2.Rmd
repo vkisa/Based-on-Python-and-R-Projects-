@@ -1,0 +1,176 @@
+---
+title: "Predicting Turkish Super League Match Result Using Generalized Linear Model"
+author: "Veli KÄ±sa"
+date: "23 MayÄ±s 2019"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Introduction
+
+This project aims to predict match score by using generalized linear model (GLM) in Turkish first division league.
+
+Data contains 3-years match reasults (2015-2016,2016-2017, 2017-2018).
+```{r}
+X2015_2016 <- read.csv("~/R/football prediction/turkishleague/2015-2016.csv")
+X2016_2017 <- read.csv("~/R/football prediction/turkishleague/2016-2017.csv")
+X2017_2018 <- read.csv("~/R/football prediction/turkishleague/2017-2018.csv")
+```
+
+```{r}
+result<-rbind(X2015_2016[,c("HomeTeam","AwayTeam","FTHG","FTAG")],X2016_2017[c("HomeTeam","AwayTeam","FTHG","FTAG")],X2017_2018[c("HomeTeam","AwayTeam","FTHG","FTAG")])
+result<-na.omit(result)
+head(result)
+result_1516<-X2015_2016[,c("HomeTeam","AwayTeam","FTHG","FTAG")]
+result_1516<-na.omit(result_1516)
+```
+
+Data frame is restricted to the columns in which we are interested. These columns,
+
+HomeTeam= The team that is playing in the usual area that they play in
+AwayTeam= The team that is playing away from home.
+FTHG= Full Time Home Team Goals
+FTAG= Full Time Away Team Goals
+
+```{r}
+mean(result[,3]) #Average of HomeGoals 
+mean(result[,4]) #Average of AwayGoals
+```
+The home team scores more goals than away team. This can be descired as home field advantage. It's a discrete probability distribution that describes the probability of the number of scores within a match (90 mins) with a known average rate of occurrence. We know that the goals don't become more or less probable by the number of goals already scored in the match. So the number of goals is independent of time. Number of goals can be counted as  function of average rate of goals.
+
+```{r}
+require(reshape2)
+require(ggplot2)
+require(plyr)
+pois.pred_1516<-function(x){
+  prob<-matrix(0,7,2)
+  for (i in 1:7){
+    for (j in 3:4){
+      prob[i,j-2]<-dpois(i-1,lambda = mean(result_1516[,j]))
+    }
+  }
+  return(prob)
+}
+plot_1516<-data.frame(score=0:6,home=t(prop.table(table(result_1516$FTHG)))[1:7],away=t(prop.table(table(result_1516$FTAG)))[1:7])
+plot_1516.m<-melt(plot_1516, id.vars='score')
+ggplot(p_1516.m, aes(score, value)) + geom_bar(aes(fill = variable), width = 0.4, position = position_dodge(width=0.5), stat="identity") +
+ labs(title="Histogram of Home-Away Team Goals 2015-2016",
+  x="Number of Goals",y="Number of Matches")+
+theme(legend.position="top")
+```
+
+
+
+$$f(x)=\frac{exp^{-\lambda}\lambda^x}{x!},\quad \lambda>0$$
+
+$\lambda$ represents the average number of goals in a match. "Home Goals" and "Away Goals" can be assumed as two independent Poisson distribution.
+
+$P(HomeGoals>AwayGoals)$ means that home team wins the match.
+$P(AwayGoals>homeGoals)$ means that away team wins the match.
+$P(HomeGoals=AwayGoals)$ mean that draw.
+
+Assumption of the independence of goals scored by each teams,$P(A\cap B)=P(A)P(B)$ let us to construct the modal easily.
+
+##Skellam Distribution
+
+The difference of two Poisson distributions called as Skellam distribution.
+Under the condition that difference of two Poisson distributions is 0,the draw status can be computed by skellam distribution.
+```{r}
+#install.packages("skellam")
+library(skellam)
+dskellam(0,lambda1 = mean(result[,3]),lambda2 = mean(result[,4])) #probability of draw
+dskellam(1,lambda1 = mean(result[,3]),lambda2 = mean(result[,4])) #probability of home team winning by 1 goal
+
+```
+
+#Building a Model
+
+```{r}
+colnames(result)[3:4]<-c("HomeGoals","AwayGoals")
+model_data1<-result[,c(1,2,3)]
+model_data1$home<-1
+colnames(model_data1)[1:3]<-c("team","opponent","goals")
+model_data2<-result[,c(2,1,4)]
+model_data2$home<-0
+colnames(model_data2)[1:3]<-c("team","opponent","goals")
+model_data<-rbind(model_data1,model_data2)
+
+p_model<-glm(formula = goals~home+team+opponent,family = poisson,data = model_data)
+
+summary(p_model)
+
+```
+The result of matches is modeled  by glm with poisson family and log link function. When we examine the coefficients table, there are both positive and negative values. Similar to logistic regression, we take the exponent of the parameter values. A positive value implies more goals, while negative value that close to zero represent neutral effect.
+According to coefficents table, "home" has coefficient of 0.26948 and we can say that home teams generally score more goals with $e^{0.26946}=1.34913$ times more likely  than the away teams. But this is not the same for all teams. For example, Besiktas and Fenerbahce are better scorers  than average with 0.79256 and 0.70061 parameters respectively, while Kasimpasa is worse scorer than average with -0.21928 parameter. Eventually, the _opponent_ values penalize or reward teams based on the quality of the opposition.
+
+#Predictions
+
+We now start making some predictions for the upcoming matches. Firstly,let us compute what is the expected average number of goals based on poisson distribution by selected teams.
+
+```{r}
+predict.glm(p_model,data.frame(team="Besiktas",opponent="Bursaspor",home=1),type ="response")[1]
+predict.glm(p_model,data.frame(team="Bursaspor",opponent="Besiktas",home=0),type ="response")[1]
+
+```
+
+We have two Poisson distributions. By creating a function called "sim_match" we can calculate the probability of various events.
+
+```{r}
+sim_match<- function(f_model,homeT,awayT,max_goals){
+  homegoals_ave<-predict.glm(p_model,data.frame(team=homeT,opponent=awayT,home=1),type ="response")[1]
+  awaygoals_ave<-predict.glm(p_model,data.frame(team=awayT,opponent=homeT,home=0),type ="response")[1]
+  team_pred<-matrix(NA,max_goals+1,2)
+  for (i in 0:max_goals){
+    team_pred[i+1,1]<-dpois(i,homegoals_ave)
+    team_pred[i+1,2]<-dpois(i,awaygoals_ave)
+    
+  }
+  match_result_matrix<-outer(team_pred[,1],team_pred[,2],FUN = "*")
+  return(list(team_pred,match_result_matrix))
+  
+}
+sim_match(f_model = p_model,homeT = "Besiktas",awayT = "Kasimpasa",max_goals=3)
+```
+
+The first column of the matrix 1 represents the probability of Besiktas (HomeTeam) scoring a specific number of goals according to rows, while the second column of the matrix 1 indicates the Kasimpasa (AwayTeam) scoring.
+From two independent poisson distribution, we create square matrix 2 that shows the match result score by multiplying two vector each other.
+
+According to matrix 2, rows represent the Besiktas (HomeTeam) and columns indicate the Kasimpasa (AwayTeam). 
+When we analyze matrix 2 in depth , along the diagonal both teams score the same number of goals. For example, the probability of draw without scores is $P(0-0)=0.0347$, while the odds of a draw with single goal is $P(1-1)=0.0767$. So we can calculate the odds of draw by summing all  the diagonal values.
+
+The area under the diagonal shows us the situations that Besiktas won, while the area above the diagonal shows us the situations Kasimpasa won.
+
+It can also be calculated over 2.5 goals or below from the matrix 2.
+
+
+Now let us let us calculate the probability of Besiktas (HomeTeam) winning the match under the maximum of 10 goals,
+
+```{r}
+bes_kas<-sim_match(f_model = p_model,homeT = "Besiktas",awayT = "Kasimpasa",max_goals=10)
+bes_win.mat<-do.call(rbind,lapply(bes_kas[2],matrix,ncol=11,byrow=FALSE))
+sum(bes_win.mat[lower.tri(bes_win.mat)])
+```
+
+
+And the probability of Kasimpasa winning the match under the maximum of 10 goals,
+```{r}
+kas_win.mat<-do.call(rbind,lapply(bes_kas[2],matrix,ncol=11,byrow=FALSE))
+sum(kas_win.mat[upper.tri(kas_win.mat)])
+```
+
+Last, the probability of draw,
+
+```{r}
+draw.mat<-do.call(rbind,lapply(bes_kas[2],matrix,ncol=11,byrow=FALSE))
+sum(diag(draw.mat))
+
+```
+
+
+
+
